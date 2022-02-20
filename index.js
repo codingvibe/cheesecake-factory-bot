@@ -1,10 +1,9 @@
-require('dotenv').config();
-const chromium = require('chrome-aws-lambda');
-const puppeteer = require('puppeteer-core');
-const AWS = require('aws-sdk');
-s3 = new AWS.S3();
-const { TwitterApi } = require('twitter-api-v2');
-const getProducts = require('./evals/products');
+import dotenv from 'dotenv';
+dotenv.config();
+import AWS from 'aws-sdk';
+const s3 = new AWS.S3();
+import { TwitterApi } from 'twitter-api-v2';
+import fetch from 'node-fetch';
 
 const TWITTER_API_KEY = process.env.TWITTER_API_KEY;
 const TWITTER_API_SECRET = process.env.TWITTER_API_SECRET;
@@ -14,48 +13,14 @@ const TWITTER_ACCESS_SECRET = process.env.TWITTER_ACCESS_SECRET;
 const BUCKET = "dev.codingvibe";
 const MENU_FILENAME = "cheesecake-factory/current-menu.json";
 const MAX_MENU_DELTA = 10;
+const IMAGE_CDN = "https://olo-images-live.imgix.net/"
+const MENU_URL = 'https://nomnom-prod-api.thecheesecakefactory.com/restaurants/171338/menu?nomnom=add-restaurant-to-menu,nested-menu&includedisabled=true'
 
-exports.handler = async (event, context, callback) => {
-  let browser;
-  const products = []
+const handler = async (event, context, callback) => {
+  let products = []
 
   try {
-    browser = await chromium.puppeteer.launch({
-      args: chromium.args,
-      defaultViewport: {
-        width: 1920,
-        height: 1080,
-        deviceScaleFactor: 1,
-      },
-      executablePath: await chromium.executablePath,
-      headless: true,
-      ignoreHTTPSErrors: true,
-    });
-
-    const page = await browser.newPage();
-    await page.goto('https://www.thecheesecakefactory.com/menu');
-    await page.click('a.c-menu__location__header--subheader');
-    await page.waitForSelector('.c-all-categories-sub-categories__link')
-
-    const allLinks = await page.evaluate(() => {
-      const links = [];
-      const allItems = document.querySelectorAll(".c-all-categories-sub-categories__link");
-      for ( let i = 0; i < allItems.length; i++) {
-        links.push(allItems[i].href);
-      }
-      return links;
-    });
-
-    const productNames = new Set();
-    for ( let i = 0; i < allLinks.length; i++) {
-      const pageProducts = await getMenuItems(page, allLinks[i]);
-      pageProducts.forEach(product => {
-        if (!productNames.has(product.name)) {
-          products.push(product);
-          productNames.add(product.name);
-        }
-      });
-    }
+    products = await getProducts();
 
     const twitterClient = new TwitterApi({
       appKey: TWITTER_API_KEY,
@@ -75,14 +40,45 @@ exports.handler = async (event, context, callback) => {
     await writeToS3(BUCKET, MENU_FILENAME, products);
   } catch (error) {
     return callback(error);
-  } finally {
-    if (browser !== null) {
-      await browser.close();
-    }
   }
 
   return callback(null, products);
 };
+
+export { handler };
+
+async function getProducts() {
+  const products = [];
+  const productNames = new Set();
+  const res = await fetch(MENU_URL);
+  if(res.status > 299) {
+    throw new Error ("Could not get menu, oopsie");
+  }
+  const fullMenu = await res.json();
+  for (let i = 0; i < fullMenu.categories.length; i++) {
+    const category = fullMenu.categories[i];
+    for (let j = 0; j < category.subCategories.length; j++) {
+      const subCategory = category.subCategories[j];
+      for (let k = 0; k < subCategory.products.length; k++) {
+        let image;
+        if (subCategory.products[k].images && subCategory.products[k].images.length > 0) {
+          image = subCategory.products[k].images[0].filename;
+        }
+        if (!productNames.has(subCategory.products[k].name)) {
+          products.push({
+            "name": subCategory.products[k].name.trim(),
+            "description": subCategory.products[k].description.trim(),
+            "subcategory": subCategory.name.trim(),
+            "category": category.name.trim(),
+            "image": `${IMAGE_CDN}${image}`
+          })
+          productNames.add(subCategory.products[k].name);
+        }
+      }
+    }
+  }
+  return products;
+}
 
 async function outputMenuDiff(productDelta, twitterClient) {
   const addedCheesecakes = productDelta.added.filter(isCheesecake);
@@ -91,36 +87,49 @@ async function outputMenuDiff(productDelta, twitterClient) {
   const removedOthers = productDelta.removed.filter(isNotCheesecake);
 
   for (let i = 0; i < addedOthers.length; i++) {
-    const tweet = `😋 ooOOOoo new menu item! ${addedOthers[i].name}: ${addedOthers[i].description}`
+    const tweet = `😋 ooOOOoo new menu item! ${addedOthers[i].name}: ${addedOthers[i].description}`;
     if (tweet.length > 280) {
-      await twitterClient.v2.tweet(`ooOOOoo new menu item! ${addedOthers[i].name}`);
+      await createTweet(twitterClient, `ooOOOoo new menu item! ${addedOthers[i].name}`, addedOthers[i].image);
     } else {
-      await twitterClient.v2.tweet(tweet);
+      await createTweet(twitterClient, tweet, addedOthers[i].image);
     }
   }
 
   for (let i = 0; i < removedOthers.length; i++) {
     const tweet = `😭 F's in chat for everyone's favorite ${removedOthers[i].name} leaving the menu`
-    await twitterClient.v2.tweet(tweet);
+    await createTweet(twitterClient, tweet, removedOthers[i].image);
   }
 
   for (let i = 0; i < addedCheesecakes.length; i++) {
     const tweet = `🚨 NEW CHEESECAKE! NOT A DRILL! ${addedCheesecakes[i].name}: ${addedCheesecakes[i].description}`
     if (tweet.length > 280) {
-      await twitterClient.v2.tweet(`🚨 NEW CHEESECAKE! NOT A DRILL! ${addedCheesecakes[i].name}`);
+      await createTweet(twitterClient, `🚨 NEW CHEESECAKE! NOT A DRILL! ${addedCheesecakes[i].name}`, addedCheesecakes[i].image);
     } else {
-      await twitterClient.v2.tweet(tweet);
+      await createTweet(twitterClient, tweet, addedCheesecakes[i].image);
     }
   }
 
   for (let i = 0; i < removedCheesecakes.length; i++) {
     const tweet = `🏹🔥⛵ FOR OUR FALLEN BRETHREN CHEESECAKE ${removedCheesecakes[i].name}: ${removedCheesecakes[i].description}`
     if (tweet.length > 280) {
-      await twitterClient.v2.tweet(`🏹🔥⛵ FOR OUR FALLEN BRETHREN CHEESECAKE ${removedCheesecakes[i].name}`);
+      await createTweet(twitterClient, `🏹🔥⛵ FOR OUR FALLEN BRETHREN CHEESECAKE ${removedCheesecakes[i].name}`, removedCheesecakes[i].image);
     } else {
-      await twitterClient.v2.tweet(tweet);
+      await createTweet(twitterClient, tweet, removedCheesecakes[i].image);
     }
   }
+}
+
+async function createTweet(twitterClient, message, image) {
+  if (image) {
+    console.log("Need elevated access for this. Uncomment when that happens...");
+    /*
+    const data = await fetch(image);
+    const blob = await (await data.blob()).arrayBuffer();
+    const mediaId = await twitterClient.v1.uploadMedia(Buffer.from(blob), {mimeType: "image/jpeg"});
+    return await twitterClient.v2.tweet(message, {media_ids: [ mediaId ] });
+    */
+  }
+  return await twitterClient.v2.tweet(message);
 }
 
 function isOutsideGuardrails(productDelta) {
@@ -135,16 +144,9 @@ function isOutsideGuardrails(productDelta) {
   return false;
 }
 
-async function getMenuItems(page, link) {
-  console.log(`navigating to ${link}`)
-  await page.goto(link);
-  await page.waitForSelector(".c-product-card__info");
-  return await page.evaluate(getProducts);
-}
-
 function printProducts(products) {
   products.forEach(product => {
-    console.log(`${product.name}: ${product.description}`);
+    console.log(`(${product.category} > ${product.subcategory}) ${product.name}: ${product.description}`);
   });
 }
 
@@ -172,8 +174,8 @@ function diffProducts(oldProducts, newProducts) {
   const oldProductNames = oldProducts.map(product => product.name);
   const newProductNames = newProducts.map(product => product.name);
 
-  const removedProductNames =  oldProductNames.filter(name => !newProductNames.includes(name));
-  const addedProductNames =  newProductNames.filter(name => !oldProductNames.includes(name));
+  const removedProductNames = oldProductNames.filter(name => !newProductNames.includes(name));
+  const addedProductNames = newProductNames.filter(name => !oldProductNames.includes(name));
 
   const removedProducts = removedProductNames.map(name => oldProducts.filter(product => product.name == name)[0]);
   const addedProducts = addedProductNames.map(name => newProducts.filter(product => product.name == name)[0]);
