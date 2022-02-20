@@ -1,0 +1,8 @@
+{
+  "dependencies": {
+    "chrome-aws-lambda": "^10.1.0",
+    "dotenv": "^16.0.0",
+    "puppeteer-core": "^13.3.2",
+    "twitter-api-v2": "^1.10.3"
+  }
+}

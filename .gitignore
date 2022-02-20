@@ -1,3 +1,6 @@
+# Lambda bundle artifacts
+*.zip
+
 # Logs
 logs
 *.log
